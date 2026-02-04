@@ -676,7 +676,7 @@ RUN set -eux; \
 
 # STIG/CIS: Install security packages (they will use FIPS OpenSSL)
 # Note: aide removed intentionally per user request
-RUN apt-get update && apt-get install -y --no-install-recommends libpam-pwquality libpam-runtime auditd rsyslog-openssl sudo libopenscap8 && apt-get clean && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends libpam-pwquality libpam-runtime auditd rsyslog-openssl sudo && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 ################################################################################
 # CRITICAL: Remove any system OpenSSL packages that were installed as dependencies
