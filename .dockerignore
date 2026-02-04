@@ -1,0 +1,16 @@
+# Documentation
+README.md
+QUICKSTART.md
+IMPLEMENTATION_SUMMARY.md
+*.md
+
+# Build artifacts
+.git
+.gitignore
+
+# Docker
+docker-compose.yml
+.dockerignore
+
+# Test scripts (copy these separately)
+build.sh

@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  rabbitmq-fips:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      secrets:
+        - wolfssl_password
+    image: rabbitmq-fips:3.13.7-ubuntu-24.04
+    container_name: rabbitmq-fips
+    hostname: rabbitmq-fips
+    ports:
+      - "5672:5672"    # AMQP port
+      - "15672:15672"  # Management UI
+      - "5671:5671"    # AMQPS (TLS) port
+      - "15671:15671"  # Management UI over TLS
+    environment:
+      # RabbitMQ Configuration
+      - RABBITMQ_USERNAME=admin
+      - RABBITMQ_PASSWORD=admin123
+      - RABBITMQ_PLUGINS=rabbitmq_management
+
+      # FIPS Environment Variables
+      - OPENSSL_CONF=/usr/local/openssl/ssl/openssl.cnf
+      - OPENSSL_MODULES=/usr/local/lib64/ossl-modules
+      - LD_LIBRARY_PATH=/usr/local/openssl/lib64:/usr/local/lib
+
+      # Erlang Configuration
+      - ERL_FLAGS=-config /opt/bitnami/rabbitmq/etc/sys
+      - RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS=-config /opt/bitnami/rabbitmq/etc/sys
+    volumes:
+      # Mount test script for validation
+      - ./test-rabbitmq-fips.sh:/usr/local/bin/test-rabbitmq-fips.sh:ro
+    healthcheck:
+      test: ["CMD", "rabbitmqctl", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    networks:
+      - rabbitmq-fips-net
+
+secrets:
+  wolfssl_password:
+    file: wolfssl_password.txt
+
+networks:
+  rabbitmq-fips-net:
+    driver: bridge

@@ -1,0 +1,41 @@
+# Helm Values for RabbitMQ FIPS Image
+# Note: No extraVolumes needed - the fix is built into the image
+
+image:
+  registry: docker.io
+  repository: rootioinc/rabbitmq
+  tag: 3.13.7-ubuntu-22.04-fips
+  pullPolicy: Always
+
+auth:
+  username: admin
+  password: admin123
+  erlangCookie: secretcookie
+
+persistence:
+  enabled: false
+
+# Use rabbitmqctl for health checks (more reliable than curl)
+customLivenessProbe:
+  exec:
+    command: [sh, -ec, rabbitmqctl node_health_check]
+  initialDelaySeconds: 120
+  periodSeconds: 30
+  timeoutSeconds: 20
+  failureThreshold: 6
+
+customReadinessProbe:
+  exec:
+    command: [sh, -ec, rabbitmqctl status]
+  initialDelaySeconds: 10
+  periodSeconds: 30
+  timeoutSeconds: 20
+  failureThreshold: 3
+
+customStartupProbe:
+  exec:
+    command: [sh, -ec, rabbitmqctl status]
+  initialDelaySeconds: 0
+  periodSeconds: 10
+  timeoutSeconds: 20
+  failureThreshold: 30

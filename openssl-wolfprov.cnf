@@ -1,0 +1,53 @@
+# OpenSSL 3 Configuration for wolfProvider with FIPS
+# This configuration loads wolfProvider which uses wolfSSL FIPS v5 backend
+#
+# IMPORTANT: wolfProvider provides FIPS 140-3 validated cryptography automatically.
+# This configuration enables Erlang to recognize FIPS capability via fips_provider_available.
+#
+# All cryptographic operations will use wolfSSL FIPS v5 (CMVP #4718) through wolfProvider.
+
+openssl_conf = openssl_init
+
+[openssl_init]
+providers = provider_sect
+# Enable FIPS mode globally so Erlang detects fips_provider_available = true
+alg_section = algorithm_sect
+
+[algorithm_sect]
+# Set default properties to require FIPS algorithms
+# This makes Erlang recognize that FIPS provider is available
+default_properties = fips=yes
+
+[provider_sect]
+# Load wolfProvider - this wraps wolfSSL FIPS v5 cryptography
+# wolfProvider provides FIPS 140-3 validated algorithms
+wolfprov = wolfprov_sect
+
+# Optional: Load default provider as fallback for non-FIPS operations
+# FIPS Compliance Note: Enabling default provider allows non-FIPS algorithms (MD5, etc.)
+# For strict FIPS compliance, keep default provider disabled (commented out)
+# default = default_sect
+
+[wolfprov_sect]
+# Path to wolfProvider shared library
+module = /usr/local/lib64/ossl-modules/libwolfprov.so
+activate = 1
+# Mark wolfProvider algorithms with fips=yes property
+# This tells Erlang that FIPS provider is available
+fips = yes
+
+[default_sect]
+# Default provider - provides non-FIPS algorithms
+# Keep deactivated for strict FIPS compliance
+activate = 0
+
+# FIPS compliance is achieved by:
+# - Using only wolfProvider (which uses wolfSSL FIPS v5 - FIPS 140-3)
+# - Setting default_properties = fips=yes (makes Erlang detect FIPS)
+# - Not enabling the default provider (which has non-FIPS algorithms)
+# - wolfProvider marked with fips=yes property
+
+[system_default_sect]
+# TLS security settings
+MinProtocol = TLSv1.2
+CipherString = DEFAULT:@SECLEVEL=2

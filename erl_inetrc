@@ -1,0 +1,6 @@
+%% Erlang inet configuration
+%% This file configures inet resolution for Erlang
+%% Basic configuration - no custom settings needed for standard deployments
+
+%% Use default DNS resolver
+{lookup, [native]}.
