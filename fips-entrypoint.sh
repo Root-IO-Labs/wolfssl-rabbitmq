@@ -36,13 +36,14 @@ else
 fi
 
 if [ -z "$OPENSSL_MODULES" ]; then
-    echo "      ✗ ERROR: OPENSSL_MODULES is not set"
-    EXIT_CODE=1
-elif [ ! -d "$OPENSSL_MODULES" ]; then
-    echo "      ✗ ERROR: OPENSSL_MODULES directory does not exist: $OPENSSL_MODULES"
-    EXIT_CODE=1
+    echo "      ℹ OPENSSL_MODULES not set (using system OpenSSL modules directory)"
 else
-    echo "      ✓ OPENSSL_MODULES: $OPENSSL_MODULES"
+    if [ ! -d "$OPENSSL_MODULES" ]; then
+        echo "      ✗ ERROR: OPENSSL_MODULES directory does not exist: $OPENSSL_MODULES"
+        EXIT_CODE=1
+    else
+        echo "      ✓ OPENSSL_MODULES: $OPENSSL_MODULES"
+    fi
 fi
 
 if [ -z "$LD_LIBRARY_PATH" ]; then
@@ -67,12 +68,12 @@ fi
 echo ""
 echo "[2/6] Validating OpenSSL installation..."
 
-OPENSSL_BIN="/usr/local/openssl/bin/openssl"
-if [ ! -x "$OPENSSL_BIN" ]; then
-    echo "      ✗ ERROR: OpenSSL binary not found or not executable: $OPENSSL_BIN"
+# Use system OpenSSL in PATH
+if ! command -v openssl >/dev/null 2>&1; then
+    echo "      ✗ ERROR: OpenSSL binary not found in PATH"
     EXIT_CODE=1
 else
-    OPENSSL_VERSION=$($OPENSSL_BIN version 2>&1 | head -n1)
+    OPENSSL_VERSION=$(openssl version 2>&1 | head -n1)
     echo "      ✓ OpenSSL found: $OPENSSL_VERSION"
 
     # Check if it's OpenSSL 3.x
@@ -126,11 +127,26 @@ fi
 echo ""
 echo "[4/6] Validating wolfProvider module..."
 
-WOLFPROV_MODULE="$OPENSSL_MODULES/libwolfprov.so"
+# Determine OpenSSL modules directory (system or custom)
+if [ -z "$OPENSSL_MODULES" ]; then
+    # Use system OpenSSL modules directory (multi-arch)
+    ARCH=$(uname -m)
+    if [ "$ARCH" = "x86_64" ]; then
+        MODULES_DIR="/usr/lib/x86_64-linux-gnu/ossl-modules"
+    elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
+        MODULES_DIR="/usr/lib/aarch64-linux-gnu/ossl-modules"
+    else
+        MODULES_DIR="/usr/lib/x86_64-linux-gnu/ossl-modules"
+    fi
+else
+    MODULES_DIR="$OPENSSL_MODULES"
+fi
+
+WOLFPROV_MODULE="$MODULES_DIR/libwolfprov.so"
 if [ ! -f "$WOLFPROV_MODULE" ]; then
     echo "      ✗ ERROR: wolfProvider module not found: $WOLFPROV_MODULE"
-    echo "      Available modules in $OPENSSL_MODULES:"
-    ls -la "$OPENSSL_MODULES/" 2>/dev/null || echo "      (directory listing failed)"
+    echo "      Available modules in $MODULES_DIR:"
+    ls -la "$MODULES_DIR/" 2>/dev/null || echo "      (directory listing failed)"
     EXIT_CODE=1
 else
     echo "      ✓ wolfProvider module: $WOLFPROV_MODULE"
@@ -216,11 +232,11 @@ echo "========================================"
 echo "Starting RabbitMQ with FIPS-enabled Erlang"
 echo ""
 
-# Ensure environment variables are exported for RabbitMQ
-export OPENSSL_CONF=/usr/local/openssl/ssl/openssl.cnf
-export OPENSSL_MODULES=/usr/local/lib64/ossl-modules
-export LD_LIBRARY_PATH=/usr/local/openssl/lib64:/usr/local/lib:${LD_LIBRARY_PATH:-}
-export PATH=/usr/local/openssl/bin:/opt/bitnami/erlang/bin:/opt/bitnami/rabbitmq/sbin:${PATH}
+# Ensure environment variables are exported for RabbitMQ (using system OpenSSL)
+export OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
+# OPENSSL_MODULES not needed for system OpenSSL (modules in standard location)
+export LD_LIBRARY_PATH=/usr/local/lib:${LD_LIBRARY_PATH:-}
+export PATH=/usr/bin:/opt/bitnami/erlang/bin:/opt/bitnami/rabbitmq/sbin:${PATH}
 
 # Set Erlang sys.config path and FIPS configuration
 # RabbitMQ uses RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS for additional Erlang arguments
@@ -231,7 +247,6 @@ export ERL_FLAGS="-config /opt/bitnami/rabbitmq/etc/sys"
 echo "Environment variables:"
 echo "  LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
 echo "  OPENSSL_CONF=$OPENSSL_CONF"
-echo "  OPENSSL_MODULES=$OPENSSL_MODULES"
 echo "  RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS=$RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS"
 echo "  ERL_FLAGS=$ERL_FLAGS"
 echo ""

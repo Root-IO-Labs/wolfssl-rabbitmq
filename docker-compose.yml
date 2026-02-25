@@ -7,7 +7,7 @@ services:
       dockerfile: Dockerfile
       secrets:
         - wolfssl_password
-    image: rabbitmq-fips:3.13.7-ubuntu-24.04
+    image: rabbitmq-fips:3.13.7-ubuntu-22.04
     container_name: rabbitmq-fips
     hostname: rabbitmq-fips
     ports:

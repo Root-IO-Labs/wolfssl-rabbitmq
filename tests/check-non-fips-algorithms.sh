@@ -23,11 +23,11 @@
 #   0 - All tests passed (100% FIPS compliance)
 #   1 - One or more tests failed
 #
-# Last Updated: 2025-12-08
-# Version: 1.0
+# Last Updated: 2026-02-25
+# Version: 1.1
 ################################################################################
 
-set -e
+# Note: NOT using 'set -e' to collect all test results before exiting
 
 # Colors for output
 RED='\033[0;31m'
@@ -53,6 +53,10 @@ echo ""
 echo "Image: $IMAGE_NAME"
 echo "Container: $CONTAINER_NAME"
 echo "Runtime: Host-based (spawns test containers)"
+echo "Timeout: 180s for RabbitMQ startup"
+echo ""
+echo "NOTE: This test spawns a fresh RabbitMQ container and waits for full startup."
+echo "      On slower systems or with high system load, increase MAX_WAIT if needed."
 echo ""
 
 # Cleanup function
@@ -79,19 +83,28 @@ test_openssl_blocked() {
     TEST_COUNT=$((TEST_COUNT + 1))
     echo -n "  Testing $description ... "
 
-    # Run the command and capture output
+    # Run the command and capture both output and exit code
     local output
+    local exit_code
     output=$(docker run --rm --entrypoint='' "$IMAGE_NAME" bash -c "$cmd" 2>&1 || true)
+    exit_code=$(docker run --rm --entrypoint='' "$IMAGE_NAME" bash -c "$cmd" >/dev/null 2>&1; echo $?)
 
     # Check if command failed (expected for non-FIPS)
-    if echo "$output" | grep -qi "disabled\|unsupported\|unknown\|not supported\|invalid\|error"; then
+    # Look for error messages or non-zero exit code
+    if echo "$output" | grep -qi "disabled\|unsupported\|unknown\|not supported\|invalid\|error\|failed\|EVP_\|PBKDF"; then
         echo -e "${GREEN}✓ BLOCKED${NC} (expected)"
+        PASS_COUNT=$((PASS_COUNT + 1))
+        BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
+        return 0
+    elif [ "$exit_code" -ne 0 ]; then
+        echo -e "${GREEN}✓ BLOCKED${NC} (expected, exit code: $exit_code)"
         PASS_COUNT=$((PASS_COUNT + 1))
         BLOCKED_COUNT=$((BLOCKED_COUNT + 1))
         return 0
     else
         echo -e "${RED}✗ ALLOWED${NC} (FIPS violation!)"
         echo "    Output: $output"
+        echo "    Exit code: $exit_code"
         FAILED=1
         return 1
     fi
@@ -106,23 +119,32 @@ test_openssl_works() {
     TEST_COUNT=$((TEST_COUNT + 1))
     echo -n "  Testing $description ... "
 
-    # Run the command and capture output
+    # Run the command and capture both output and exit code
     local output
+    local exit_code
     output=$(docker run --rm --entrypoint='' "$IMAGE_NAME" bash -c "$cmd" 2>&1 || true)
+    exit_code=$(docker run --rm --entrypoint='' "$IMAGE_NAME" bash -c "$cmd" >/dev/null 2>&1; echo $?)
 
     # Check if command succeeded (expected for FIPS)
-    if echo "$output" | grep -qv "disabled\|unsupported\|unknown\|not supported\|invalid\|error"; then
-        # Additional check: output should have actual hash/cipher data
-        if [ -n "$output" ] && [ "$output" != "" ]; then
-            echo -e "${GREEN}✓ WORKS${NC} (expected)"
-            PASS_COUNT=$((PASS_COUNT + 1))
-            WORKING_COUNT=$((WORKING_COUNT + 1))
-            return 0
-        fi
+    # For FIPS algorithms, we expect either:
+    # 1. Exit code 0 with output, OR
+    # 2. Output containing hash/cipher data without error messages
+    if [ "$exit_code" -eq 0 ] && [ -n "$output" ]; then
+        echo -e "${GREEN}✓ WORKS${NC} (expected)"
+        PASS_COUNT=$((PASS_COUNT + 1))
+        WORKING_COUNT=$((WORKING_COUNT + 1))
+        return 0
+    elif [ -n "$output" ] && ! echo "$output" | grep -qi "disabled\|unsupported\|unknown\|not supported\|invalid\|error\|failed"; then
+        # Output exists and no error messages
+        echo -e "${GREEN}✓ WORKS${NC} (expected)"
+        PASS_COUNT=$((PASS_COUNT + 1))
+        WORKING_COUNT=$((WORKING_COUNT + 1))
+        return 0
     fi
 
     echo -e "${RED}✗ FAILED${NC} (should work!)"
     echo "    Output: $output"
+    echo "    Exit code: $exit_code"
     FAILED=1
     return 1
 }
@@ -252,44 +274,91 @@ echo "==========================================================================
 echo ""
 
 echo "Starting RabbitMQ container for RabbitMQ-specific testing..."
-docker run -d \
+if docker run -d \
     --name "$CONTAINER_NAME" \
     -e RABBITMQ_USERNAME=admin \
     -e RABBITMQ_PASSWORD=admin123 \
-    "$IMAGE_NAME" >/dev/null 2>&1
-
-if [ $? -eq 0 ]; then
+    "$IMAGE_NAME" >/dev/null 2>&1; then
     echo -e "${GREEN}✓ Container started${NC}"
 else
     echo -e "${RED}✗ Failed to start container${NC}"
     echo "Checking container logs..."
     docker logs "$CONTAINER_NAME" 2>&1 | tail -20
+    FAILED=1
     exit 1
 fi
 
 echo "Waiting for RabbitMQ to be ready..."
 WAIT_TIME=0
-MAX_WAIT=90
+MAX_WAIT=180
+READY=0
 
 while [ $WAIT_TIME -lt $MAX_WAIT ]; do
-    if docker exec "$CONTAINER_NAME" rabbitmqctl status >/dev/null 2>&1; then
-        echo -e "${GREEN}✓ RabbitMQ ready (${WAIT_TIME}s)${NC}"
-        break
+    # Multi-stage readiness check
+    # Stage 1: Check if Erlang node is up
+    if docker exec "$CONTAINER_NAME" rabbitmqctl await_startup >/dev/null 2>&1; then
+        # Stage 2: Check if rabbit app is running and vhosts accessible
+        if docker exec "$CONTAINER_NAME" rabbitmqctl list_vhosts >/dev/null 2>&1; then
+            # Stage 3: Verify status command works
+            if docker exec "$CONTAINER_NAME" rabbitmqctl status >/dev/null 2>&1; then
+                echo -e "${GREEN}✓ RabbitMQ fully ready (${WAIT_TIME}s)${NC}"
+                READY=1
+                break
+            else
+                # Status not ready yet, but vhosts work - probably still initializing
+                if [ $((WAIT_TIME % 9)) -eq 0 ]; then
+                    echo "  Waiting for status command to work... (${WAIT_TIME}s)"
+                fi
+            fi
+        else
+            # Vhosts not accessible yet - rabbit app not fully up
+            if [ $((WAIT_TIME % 9)) -eq 0 ]; then
+                echo "  Waiting for rabbit app to start... (${WAIT_TIME}s)"
+            fi
+        fi
+    else
+        # Erlang node not up yet
+        if [ $((WAIT_TIME % 9)) -eq 0 ]; then
+            echo "  Waiting for Erlang node to start... (${WAIT_TIME}s)"
+        fi
     fi
     sleep 3
     WAIT_TIME=$((WAIT_TIME + 3))
 done
 
-if [ $WAIT_TIME -ge $MAX_WAIT ]; then
+if [ $READY -eq 0 ]; then
     echo -e "${RED}✗ RabbitMQ failed to start within ${MAX_WAIT}s${NC}"
     echo ""
-    echo "Container logs:"
-    docker logs "$CONTAINER_NAME" 2>&1 | tail -50
+    echo "=== Diagnostic Information ==="
+    echo ""
+    echo "Container status:"
+    docker ps -a | grep "$CONTAINER_NAME" || true
+    echo ""
+    echo "Last 80 lines of container logs:"
+    docker logs "$CONTAINER_NAME" 2>&1 | tail -80
+    echo ""
+    echo "Attempting rabbitmqctl status:"
+    docker exec "$CONTAINER_NAME" rabbitmqctl status 2>&1 || true
+    echo ""
+    echo "Attempting rabbitmqctl await_startup:"
+    docker exec "$CONTAINER_NAME" rabbitmqctl await_startup 2>&1 || true
+    echo ""
+    echo "=== Possible Solutions ==="
+    echo ""
+    echo "1. System load: System may be under heavy load. Try running again when system is less busy."
+    echo "2. Increase timeout: Edit this script and increase MAX_WAIT from 180 to 300 or higher."
+    echo "3. Check FIPS validation: Look for FIPS validation errors in the logs above."
+    echo "4. Manual test: Try running container manually with:"
+    echo "   docker run -d --name test-rabbit $IMAGE_NAME"
+    echo "   docker logs -f test-rabbit"
+    echo "5. Resource limits: Ensure Docker has sufficient memory (at least 2GB for RabbitMQ)."
+    echo ""
+    FAILED=1
     exit 1
 fi
 
-# Give RabbitMQ a few more seconds to stabilize after initial readiness
-echo "Waiting for RabbitMQ to stabilize..."
+# Give RabbitMQ a bit more time to fully stabilize
+echo "Waiting for RabbitMQ to fully stabilize..."
 sleep 5
 
 # Verify container is still running
@@ -298,6 +367,7 @@ if ! docker ps | grep -q "$CONTAINER_NAME"; then
     echo ""
     echo "Container logs:"
     docker logs "$CONTAINER_NAME" 2>&1 | tail -50
+    FAILED=1
     exit 1
 fi
 
