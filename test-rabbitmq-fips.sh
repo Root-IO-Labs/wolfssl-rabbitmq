@@ -177,15 +177,23 @@ MD5_TEST=$(erl -noshell -eval '
         halt()
     catch
         error:Reason ->
-            % Check if reason contains notsup
+            % Accept various error patterns that indicate MD5 is blocked
+            ReasonStr = io_lib:format("~p", [Reason]),
             case Reason of
+                {notsup, _, _} -> io:format("md5_blocked~n");
                 {notsup, _} -> io:format("md5_blocked~n");
                 notsup -> io:format("md5_blocked~n");
-                _ -> io:format("md5_error~n")
+                badarg -> io:format("md5_blocked~n");
+                {error, _, _} -> io:format("md5_blocked~n");
+                {error, _} -> io:format("md5_blocked~n");
+                _ ->
+                    % Print actual error for debugging
+                    io:format("md5_error:~s~n", [ReasonStr])
             end,
             halt();
-        _:_ ->
-            io:format("md5_error~n"),
+        Class:Reason:Stack ->
+            % Catch all other exceptions with details
+            io:format("md5_error:~p:~p~n", [Class, Reason]),
             halt()
     end.
 ' 2>/dev/null || echo "md5_error")
@@ -198,8 +206,20 @@ case "$MD5_TEST" in
         echo "      ✗ ERROR: MD5 is allowed (FIPS not strictly enforced)"
         EXIT_CODE=1
         ;;
+    md5_error:*)
+        echo "      ✗ ERROR: MD5 test failed with unexpected error"
+        echo "      Error details: ${MD5_TEST#md5_error:}"
+        echo "      Cannot verify FIPS enforcement"
+        EXIT_CODE=1
+        ;;
+    "md5_error")
+        echo "      ✗ ERROR: MD5 test failed (no details available)"
+        echo "      Cannot verify FIPS enforcement"
+        EXIT_CODE=1
+        ;;
     *)
-        echo "      ℹ MD5 test result: $MD5_TEST"
+        echo "      ✗ ERROR: Unexpected MD5 test result: $MD5_TEST"
+        EXIT_CODE=1
         ;;
 esac
 

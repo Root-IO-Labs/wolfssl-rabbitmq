@@ -161,7 +161,7 @@ RUN set -eux; \
     rm -rf wolfProvider; \
     echo "✓ wolfProvider installed to ${OSSL_MODULES_DIR}"
 
-# Verify wolfProvider installation
+# Verify wolfProvider installation and prepare for export to runtime stage
 RUN set -eux; \
     ARCH=$(uname -m); \
     if [ "$ARCH" = "x86_64" ]; then MULTIARCH="x86_64-linux-gnu"; \
@@ -175,7 +175,12 @@ RUN set -eux; \
     else \
         echo "ERROR: wolfProvider module not found at ${OSSL_MODULES_DIR}/libwolfprov.so"; \
         exit 1; \
-    fi
+    fi; \
+    \
+    # Copy wolfProvider to a consistent location for runtime stage (architecture-independent)
+    mkdir -p /tmp/wolfprov-export; \
+    cp -v "${OSSL_MODULES_DIR}"/libwolfprov.so* /tmp/wolfprov-export/; \
+    echo "✓ wolfProvider exported to /tmp/wolfprov-export for runtime stage"
 
 ################################################################################
 # Build Erlang/OTP with FIPS support
@@ -291,8 +296,8 @@ RUN set -eux; \
 COPY --from=builder /usr/local/lib/libwolfssl.so* /usr/local/lib/
 COPY --from=builder /usr/local/include/wolfssl /usr/local/include/wolfssl
 
-# Copy wolfProvider from builder to temporary location
-COPY --from=builder /usr/lib/x86_64-linux-gnu/ossl-modules/libwolfprov.so* /tmp/wolfprov/
+# Copy wolfProvider from builder to temporary location (architecture-independent path)
+COPY --from=builder /tmp/wolfprov-export/ /tmp/wolfprov/
 
 # Install wolfProvider to correct system OpenSSL modules directory
 RUN set -eux; \
