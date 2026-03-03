@@ -705,9 +705,11 @@ RUN chmod +x /opt/bitnami/rabbitmq/sbin/rabbitmq-env
 
 # Set environment variables for runtime (system location first for FIPS priority)
 # Note: LD_LIBRARY_PATH set later (line ~927) without hardcoded arch paths; ldconfig handles system libs
-ENV PATH="/usr/bin:/usr/local/openssl/bin:/opt/bitnami/erlang/bin:/opt/bitnami/rabbitmq/sbin:${PATH}"
-ENV OPENSSL_CONF=/usr/local/openssl/ssl/openssl.cnf
-ENV OPENSSL_MODULES=/usr/local/lib64/ossl-modules
+ENV PATH="/usr/bin:/opt/bitnami/erlang/bin:/opt/bitnami/rabbitmq/sbin:${PATH}"
+ENV OPENSSL_CONF=/etc/ssl/openssl.cnf
+# Note: OPENSSL_MODULES not set - Ubuntu System OpenSSL 3.x automatically uses correct
+# architecture-specific module path (/usr/lib/x86_64-linux-gnu/ossl-modules or
+# /usr/lib/aarch64-linux-gnu/ossl-modules). See fips-entrypoint.sh line 38-39.
 
 # RabbitMQ environment variables
 ENV HOME="/opt/bitnami/rabbitmq/.rabbitmq"
