@@ -3,9 +3,12 @@
 # This file ensures FIPS-related environment variables are always set
 
 # OpenSSL and wolfSSL library paths
-export LD_LIBRARY_PATH="/usr/local/openssl/lib64:/usr/local/lib:${LD_LIBRARY_PATH:-}"
-export OPENSSL_CONF="/usr/local/openssl/ssl/openssl.cnf"
-export OPENSSL_MODULES="/usr/local/lib64/ossl-modules"
+# Using system OpenSSL 3.0.2 from Ubuntu with wolfProvider
+export LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH:-}"
+export OPENSSL_CONF="/etc/ssl/openssl.cnf"
+# OPENSSL_MODULES not needed - system OpenSSL uses architecture-specific paths:
+# /usr/lib/x86_64-linux-gnu/ossl-modules (x86_64)
+# /usr/lib/aarch64-linux-gnu/ossl-modules (aarch64)
 
 # Erlang FIPS configuration
 # This must be set before Erlang VM starts

@@ -2,15 +2,6 @@
 
 This Docker image provides **RabbitMQ 3.13.7** with **FIPS 140-3 compliant cryptography** using **wolfSSL FIPS v5** and **wolfProvider** on **Ubuntu 22.04**.
 
-## Build Variants
-
-Two Dockerfile variants are available:
-
-| Dockerfile | Description | FIPS 140-3 | DISA STIG/CIS |
-|-----------|-------------|------------|---------------|
-| `Dockerfile` | FIPS 140-3 compliant image | Yes | No |
-| `Dockerfile.hardened` | FIPS 140-3 + DISA STIG/CIS hardened image | Yes | Yes |
-
 ## Architecture
 
 ```
@@ -20,9 +11,9 @@ RabbitMQ → Erlang/OTP Crypto Module → OpenSSL 3.x API → wolfProvider → w
 ### Components
 
 - **Base OS**: Ubuntu 22.04
-- **Erlang/OTP**: 26.2.5 (built with `--enable-fips`)
+- **Erlang/OTP**: 26.2.5 (crypto NIF linked to FIPS OpenSSL/wolfSSL)
 - **RabbitMQ**: 3.13.7 (generic Unix package)
-- **OpenSSL**: 3.0.15 (with FIPS module support)
+- **OpenSSL**: 3.0.2 (Ubuntu system OpenSSL)
 - **wolfSSL**: 5.8.2 FIPS v5 (FIPS 140-3 validated cryptographic module)
 - **wolfProvider**: v1.1.0 (OpenSSL 3.x provider for wolfSSL)
 
@@ -46,48 +37,17 @@ This image achieves FIPS 140-3 compliance through:
 
 ### Prerequisites
 
-1. **wolfSSL Password File**: Create `wolfssl_password.txt` with your wolfSSL FIPS package password
+1. **wolfSSL Password File**: Create `../wolfssl_password.txt` with your wolfSSL FIPS package password
 2. **Docker** with BuildKit support
 3. **Docker Compose** (optional, for easier deployment)
 
-### Required Files
-
-**Standard FIPS Build:**
-- `Dockerfile` - FIPS 140-3 compliant image
-- `wolfssl_password.txt` - wolfSSL FIPS package password
-
-**Hardened FIPS Build:**
-- `Dockerfile.hardened` - FIPS 140-3 + DISA STIG/CIS hardened image
-- `build-hardened.sh` - Build script for hardened variant
-- `wolfssl_password.txt` - wolfSSL FIPS package password
-
-### Build Standard FIPS Image with Docker
+### Build with Docker
 
 ```bash
-# Build the standard FIPS image
+# Build the image
 DOCKER_BUILDKIT=1 docker build \
   --secret id=wolfssl_password,src=wolfssl_password.txt \
   -t rabbitmq-fips:3.13.7-ubuntu-22.04 .
-```
-
-### Build Hardened FIPS Image with Build Script
-
-```bash
-# Build the hardened FIPS + STIG/CIS image
-chmod +x build-hardened.sh
-./build-hardened.sh
-```
-
-The `build-hardened.sh` script performs pre-build checks and builds using `Dockerfile.hardened`.
-
-### Manual Build of Hardened Image
-
-```bash
-# Build hardened image manually with Docker
-DOCKER_BUILDKIT=1 docker build \
-  --secret id=wolfssl_password,src=wolfssl_password.txt \
-  -t rabbitmq:3.13.7-ubuntu-22.04-fips \
-  -f Dockerfile.hardened .
 ```
 
 ### Build with Docker Compose
@@ -192,39 +152,37 @@ RabbitMQ FIPS Validation Test
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OPENSSL_CONF` | `/usr/local/openssl/ssl/openssl.cnf` | OpenSSL configuration file |
-| `OPENSSL_MODULES` | `/usr/local/lib64/ossl-modules` | OpenSSL provider modules directory |
-| `LD_LIBRARY_PATH` | `/usr/local/openssl/lib64:/usr/local/lib` | Library search path |
+| `OPENSSL_CONF` | `/etc/ssl/openssl.cnf` | OpenSSL configuration file |
+| `LD_LIBRARY_PATH` | `/usr/local/lib` | Library search path (for wolfSSL) |
 | `RABBITMQ_USERNAME` | - | RabbitMQ admin username |
 | `RABBITMQ_PASSWORD` | - | RabbitMQ admin password |
 | `RABBITMQ_PLUGINS` | - | Comma-separated list of plugins to enable |
 
 ### Erlang FIPS Configuration
 
-FIPS mode is configured in `/opt/bitnami/rabbitmq/etc/sys.config`:
+FIPS mode is enforced at the cryptographic library level (wolfSSL/OpenSSL), not via Erlang configuration:
 
-```erlang
-[
-    {crypto, [
-        {fips_mode, true}
-    ]}
-].
-```
+- **No `--enable-fips` flag**: Erlang/OTP 26+ removed this build flag
+- **No `{fips_mode, true}` in sys.config**: FIPS is enforced by linking Erlang's crypto NIF to FIPS-validated OpenSSL/wolfSSL
+- **Cryptographic routing**: All crypto operations automatically use FIPS-validated wolfCrypt via OpenSSL 3.x and wolfProvider
 
-This must be set **before** the Erlang crypto module loads.
+The Erlang crypto module transparently uses FIPS cryptography through its linkage to the FIPS OpenSSL libraries.
 
 ### OpenSSL Configuration
 
-OpenSSL is configured in `/usr/local/openssl/ssl/openssl.cnf` to load wolfProvider:
+OpenSSL is configured in `/etc/ssl/openssl.cnf` to load wolfProvider:
 
 ```ini
 [provider_sect]
 wolfprov = wolfprov_sect
 
 [wolfprov_sect]
-module = /usr/local/lib64/ossl-modules/libwolfprov.so
+module = /usr/lib/x86_64-linux-gnu/ossl-modules/libwolfprov.so
 activate = 1
+fips = yes
 ```
+
+The wolfProvider module path varies by architecture (x86_64 or aarch64/ARM64).
 
 ## Ports
 
@@ -271,17 +229,6 @@ Connect to `amqp://admin:admin123@localhost:5672/`
 - wolfSSL compilation: ~5-10 minutes
 - Total build time: ~25-35 minutes (first build)
 
-### Build Artifacts
-
-**Standard FIPS Build:**
-- Image: `rabbitmq-fips:3.13.7-ubuntu-22.04`
-- Size: ~500-600 MB
-
-**Hardened FIPS Build:**
-- Image: `rabbitmq:3.13.7-ubuntu-22.04-fips`
-- Size: ~500-600 MB
-- Includes additional security hardening configurations in `/etc/security`, `/etc/pam.d`, `/etc/audit`
-
 ## Troubleshooting
 
 ### Container Fails to Start
@@ -318,23 +265,14 @@ Use FIPS-approved alternatives:
 
 ```
 rabbitmq-fips/
-├── Dockerfile                    # Standard FIPS build definition
-├── Dockerfile.hardened           # FIPS + STIG/CIS hardened build definition
-├── build-hardened.sh             # Build script for hardened variant
+├── Dockerfile                    # Multi-stage build definition
 ├── docker-compose.yml            # Docker Compose configuration
 ├── openssl-wolfprov.cnf          # OpenSSL configuration
 ├── sys.config                    # Erlang FIPS configuration
-├── erl_inetrc                    # Erlang inet configuration
-├── rabbitmq-env-fips.sh          # RabbitMQ FIPS environment wrapper
 ├── fips-entrypoint.sh            # FIPS validation entrypoint
 ├── test-fips.c                   # wolfSSL FIPS build-time test
 ├── fips-startup-check.c          # FIPS runtime validation utility
 ├── test-rabbitmq-fips.sh         # RabbitMQ FIPS test script
-├── patches/                      # CVE patches for util-linux
-│   ├── CVE-2021-3995.patch
-│   ├── CVE-2021-3996.patch
-│   ├── CVE-2022-0563.patch
-│   └── CVE-2024-28085-v2.37.2.patch
 ├── rootfs/                       # RabbitMQ Bitnami scripts
 │   └── opt/bitnami/scripts/
 │       ├── rabbitmq/
@@ -347,49 +285,32 @@ rabbitmq-fips/
 
 ## Implementation Approach
 
-This RabbitMQ FIPS image follows the **same approach** as the Node.js FIPS implementation:
+This RabbitMQ FIPS image uses Ubuntu system OpenSSL with wolfSSL FIPS backend:
 
 ### Shared Components
 
-1. **OpenSSL 3.0.15** - Same build configuration
-2. **wolfSSL FIPS v5** - Identical FIPS cryptographic module
-3. **wolfProvider v1.1.0** - Same OpenSSL provider bridge
+1. **Ubuntu System OpenSSL 3.0.2** - Simplified build, relies on Ubuntu security updates
+2. **wolfSSL FIPS v5** - FIPS 140-3 validated cryptographic module
+3. **wolfProvider v1.1.0** - OpenSSL 3.x provider bridge to wolfSSL
 
 ### RabbitMQ-Specific Additions
 
-1. **Erlang/OTP 26.2.5** - Built with `--enable-fips`
-2. **Erlang sys.config** - FIPS mode configuration
-3. **FIPS Entrypoint** - RabbitMQ-specific validation
+1. **Erlang/OTP 26.2.5** - Crypto NIF linked to system OpenSSL/wolfSSL (no `--enable-fips` flag - removed in OTP 26+)
+2. **FIPS Entrypoint** - RabbitMQ-specific validation and cryptographic verification
 
-### Compatibility
+### Benefits of Using System OpenSSL
 
-Both Node.js and RabbitMQ images share the **same underlying FIPS cryptography** (wolfSSL FIPS v5), ensuring consistent cryptographic behavior across different runtime environments.
+- **Simplified Build**: No need to compile OpenSSL from source, reducing build time
+- **Security Updates**: Automatic security patches from Ubuntu
+- **Smaller Image**: Reduced image size by using system libraries
+- **Compatibility**: Standard system paths improve compatibility
 
 ## Security Considerations
-
-### Standard FIPS Image (Dockerfile)
 
 1. **Non-root User**: Container runs as user `1001` (rabbitmq)
 2. **SUID/SGID Removed**: No setuid/setgid binaries in image
 3. **Minimal Base**: Ubuntu 22.04 with minimal packages
 4. **FIPS Enforcement**: Non-FIPS algorithms blocked at runtime
-
-### Hardened FIPS Image (Dockerfile.hardened)
-
-The hardened variant includes all standard FIPS security plus additional DISA STIG V2R1 and CIS Level 1 Server hardening:
-
-1. **Password Policies**: 60-day max age, 7-day min age, 14-day warning, SHA512 hashing, 5-round salting
-2. **Password Complexity**: 15-character minimum, 4 character classes required, dictionary checks
-3. **Account Lockout**: 3 failed login attempts, 15-minute lockout, 4-second login delay
-4. **Kernel Hardening**: ASLR enabled, core dumps disabled, dmesg restricted, ptrace scope limited
-5. **Network Hardening**: IP forwarding disabled, ICMP redirects blocked, source routing disabled, SYN cookies enabled
-6. **Audit Logging**: System call auditing for time changes, identity modifications, privileged actions
-7. **PAM Hardening**: Faillock integration, lastlog tracking, su command restricted to sugroup
-8. **File Permissions**: World-writable bits removed, UMASK 077, no orphaned files
-9. **SSH Hardening**: Root login disabled, password auth disabled, FIPS-approved ciphers only
-10. **Sudo Hardening**: PTY required, logging enabled, zero timestamp timeout
-11. **CVE Patching**: util-linux upgraded with CVE-2021-3995, CVE-2021-3996, CVE-2022-0563, CVE-2024-28085 patches
-12. **Crypto Library Removal**: All non-FIPS crypto libraries removed (GnuTLS, Nettle, libgcrypt)
 
 ## References
 

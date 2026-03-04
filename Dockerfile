@@ -7,7 +7,6 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8
 
 # Build configuration
-ENV OPENSSL_VERSION=3.0.15
 ENV WOLFSSL_URL=https://www.wolfssl.com/comm/wolfssl/wolfssl-5.8.2-commercial-fips-v5.2.3.7z
 ENV WOLFPROV_REPO=https://github.com/wolfSSL/wolfProvider.git
 ENV WOLFPROV_VERSION=v1.1.0
@@ -15,7 +14,8 @@ ENV ERLANG_VERSION=26.2.5
 ENV RABBITMQ_VERSION=3.13.7
 
 # Installation paths
-ENV OPENSSL_PREFIX=/usr/local/openssl
+# Using Ubuntu system OpenSSL 3.0.2 instead of building from source
+ENV OPENSSL_PREFIX=/usr
 ENV WOLFSSL_PREFIX=/usr/local
 ENV WOLFPROV_PREFIX=/usr/local
 ENV ERLANG_PREFIX=/opt/bitnami/erlang
@@ -36,6 +36,9 @@ RUN set -eux; \
         pkg-config \
         p7zip-full \
         perl \
+        # OpenSSL 3.0.2 from Ubuntu (instead of building from source)
+        openssl \
+        libssl-dev \
         # Erlang build dependencies
         libncurses-dev \
         libncurses6 \
@@ -46,38 +49,17 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*
 
 ################################################################################
-# Build OpenSSL 3.0.x with FIPS module support
+# Using Ubuntu System OpenSSL 3.0.2
 ################################################################################
+# OpenSSL 3.0.2 is installed via apt (openssl + libssl-dev)
+# This simplifies the build, reduces image size, and relies on Ubuntu's
+# security updates for OpenSSL patches
+#
+# Verify system OpenSSL installation
 RUN set -eux; \
-    cd /tmp; \
-    wget https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz; \
-    tar -xzf openssl-${OPENSSL_VERSION}.tar.gz; \
-    cd openssl-${OPENSSL_VERSION}; \
-    ./Configure \
-        --prefix=${OPENSSL_PREFIX} \
-        --openssldir=${OPENSSL_PREFIX}/ssl \
-        --libdir=lib64 \
-        enable-fips \
-        shared \
-        linux-x86_64 \
-    ; \
-    make -j"$(nproc)"; \
-    make install_sw; \
-    make install_fips; \
-    make install_ssldirs; \
-    cd ..; \
-    rm -rf openssl-${OPENSSL_VERSION}*; \
-    echo "OpenSSL ${OPENSSL_VERSION} installed successfully"
-
-# Update environment for subsequent builds
-ENV PATH="${OPENSSL_PREFIX}/bin:${PATH}"
-ENV LD_LIBRARY_PATH="${OPENSSL_PREFIX}/lib64"
-ENV PKG_CONFIG_PATH="${OPENSSL_PREFIX}/lib64/pkgconfig"
-
-# Verify OpenSSL installation
-RUN openssl version && \
-    openssl list -providers && \
-    ls -la ${OPENSSL_PREFIX}/lib64/ossl-modules/
+    openssl version; \
+    pkg-config --modversion openssl; \
+    echo "✓ Using Ubuntu system OpenSSL $(openssl version | cut -d' ' -f2)"
 
 ################################################################################
 # Build wolfSSL FIPS v5
@@ -87,14 +69,12 @@ COPY test-fips.c /tmp/test-fips.c
 RUN --mount=type=secret,id=wolfssl_password \
     set -eux; \
     mkdir -p /usr/src; \
-    wget --no-check-certificate -O /tmp/wolfssl.7z "${WOLFSSL_URL}"; \
+    wget -O /tmp/wolfssl.7z "${WOLFSSL_URL}"; \
     PASSWORD=$(cat /run/secrets/wolfssl_password | tr -d '\n\r'); \
     7z x /tmp/wolfssl.7z -o/usr/src -p"${PASSWORD}"; \
     rm /tmp/wolfssl.7z; \
     mv /usr/src/wolfssl* /usr/src/wolfssl; \
     cd /usr/src/wolfssl; \
-    # Remove Python-specific defines that can cause issues
-    sed -i '/^#ifdef WOLFSSL_PYTHON/,/^#endif/d' wolfssl/wolfcrypt/settings.h || true; \
     # Configure wolfSSL with FIPS v5 and necessary features
     ./configure \
         --prefix=${WOLFSSL_PREFIX} \
@@ -103,7 +83,6 @@ RUN --mount=type=secret,id=wolfssl_password \
         --enable-cmac \
         --enable-keygen \
         --enable-sha \
-        --enable-des3 \
         --enable-aesctr \
         --enable-aesccm \
         --enable-x963kdf \
@@ -113,7 +92,7 @@ RUN --mount=type=secret,id=wolfssl_password \
         --enable-enckeys \
         --enable-base16 \
         --with-eccminsz=192 \
-        CPPFLAGS="-DHAVE_AES_ECB -DWOLFSSL_AES_DIRECT -DWC_RSA_NO_PADDING -DWOLFSSL_PUBLIC_MP -DHAVE_PUBLIC_FFDHE -DWOLFSSL_DH_EXTRA -DWOLFSSL_PSS_LONG_SALT -DWOLFSSL_PSS_SALT_LEN_DISCOVER -DRSA_MIN_SIZE=1024" \
+        CPPFLAGS="-DHAVE_AES_ECB -DWOLFSSL_AES_DIRECT -DWC_RSA_NO_PADDING -DWOLFSSL_PUBLIC_MP -DHAVE_PUBLIC_FFDHE -DWOLFSSL_DH_EXTRA -DWOLFSSL_PSS_LONG_SALT -DWOLFSSL_PSS_SALT_LEN_DISCOVER -DRSA_MIN_SIZE=2048" \
     ; \
     make -j"$(nproc)"; \
     ./fips-hash.sh; \
@@ -124,8 +103,8 @@ RUN --mount=type=secret,id=wolfssl_password \
     rm -rf /usr/src/wolfssl; \
     echo "wolfSSL FIPS v5 installed successfully"
 
-# Update library path for wolfSSL
-ENV LD_LIBRARY_PATH="${OPENSSL_PREFIX}/lib64:${WOLFSSL_PREFIX}/lib"
+# Update library path for wolfSSL (system OpenSSL in standard paths)
+ENV LD_LIBRARY_PATH="${WOLFSSL_PREFIX}/lib"
 
 # Test wolfSSL installation
 RUN set -eux; \
@@ -147,6 +126,14 @@ RUN set -eux; \
 # Build wolfProvider
 ################################################################################
 RUN set -eux; \
+    # Detect architecture for system OpenSSL module path
+    ARCH=$(uname -m); \
+    if [ "$ARCH" = "x86_64" ]; then MULTIARCH="x86_64-linux-gnu"; \
+    elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then MULTIARCH="aarch64-linux-gnu"; \
+    else MULTIARCH="x86_64-linux-gnu"; fi; \
+    OSSL_MODULES_DIR="/usr/lib/${MULTIARCH}/ossl-modules"; \
+    echo "Building wolfProvider for $ARCH (modules: $OSSL_MODULES_DIR)"; \
+    \
     cd /tmp; \
     git clone --depth 1 --branch ${WOLFPROV_VERSION} ${WOLFPROV_REPO} wolfProvider; \
     cd wolfProvider; \
@@ -159,51 +146,41 @@ RUN set -eux; \
     make -j"$(nproc)"; \
     echo "wolfProvider built, checking build artifacts..."; \
     find . -name "*.so" -type f; \
-    echo "Installing wolfProvider..."; \
-    make install; \
-    echo "Checking installation results..."; \
-    find /usr/local -name "*wolfprov*" -type f 2>/dev/null || true; \
-    find ${OPENSSL_PREFIX} -name "*wolfprov*" -type f 2>/dev/null || true; \
-    # Manual installation if make install didn't work
-    if [ ! -f "${OPENSSL_PREFIX}/lib64/ossl-modules/libwolfprov.so" ]; then \
-        echo "Manual installation required..."; \
-        mkdir -p ${OPENSSL_PREFIX}/lib64/ossl-modules; \
-        if [ -f ".libs/libwolfprov.so" ]; then \
-            cp -v .libs/libwolfprov.so* ${OPENSSL_PREFIX}/lib64/ossl-modules/ || true; \
-        fi; \
-        if [ -f "src/.libs/libwolfprov.so" ]; then \
-            cp -v src/.libs/libwolfprov.so* ${OPENSSL_PREFIX}/lib64/ossl-modules/ || true; \
-        fi; \
+    \
+    # Install wolfProvider to system OpenSSL modules directory
+    echo "Installing wolfProvider to ${OSSL_MODULES_DIR}..."; \
+    mkdir -p "${OSSL_MODULES_DIR}"; \
+    if [ -f ".libs/libwolfprov.so" ]; then \
+        cp -v .libs/libwolfprov.so* "${OSSL_MODULES_DIR}/" || true; \
     fi; \
+    if [ -f "src/.libs/libwolfprov.so" ]; then \
+        cp -v src/.libs/libwolfprov.so* "${OSSL_MODULES_DIR}/" || true; \
+    fi; \
+    \
     cd ..; \
     rm -rf wolfProvider; \
-    echo "wolfProvider installation completed"
+    echo "✓ wolfProvider installed to ${OSSL_MODULES_DIR}"
 
-# Verify wolfProvider installation
+# Verify wolfProvider installation and prepare for export to runtime stage
 RUN set -eux; \
-    echo "Checking for wolfProvider in possible locations..."; \
-    if [ -d "${OPENSSL_PREFIX}/lib64/ossl-modules" ]; then \
-        ls -la ${OPENSSL_PREFIX}/lib64/ossl-modules/; \
-    fi; \
-    if [ -d "${OPENSSL_PREFIX}/lib/ossl-modules" ]; then \
-        ls -la ${OPENSSL_PREFIX}/lib/ossl-modules/; \
-    fi; \
-    if [ -d "${WOLFPROV_PREFIX}/lib64/ossl-modules" ]; then \
-        ls -la ${WOLFPROV_PREFIX}/lib64/ossl-modules/; \
-    fi; \
-    if [ -d "${WOLFPROV_PREFIX}/lib/ossl-modules" ]; then \
-        ls -la ${WOLFPROV_PREFIX}/lib/ossl-modules/; \
-    fi; \
-    # Check if libwolfprov.so exists in any of the expected locations
-    if [ -f "${OPENSSL_PREFIX}/lib64/ossl-modules/libwolfprov.so" ] || \
-       [ -f "${OPENSSL_PREFIX}/lib/ossl-modules/libwolfprov.so" ] || \
-       [ -f "${WOLFPROV_PREFIX}/lib64/ossl-modules/libwolfprov.so" ] || \
-       [ -f "${WOLFPROV_PREFIX}/lib/ossl-modules/libwolfprov.so" ]; then \
-        echo "wolfProvider module found and verified"; \
+    ARCH=$(uname -m); \
+    if [ "$ARCH" = "x86_64" ]; then MULTIARCH="x86_64-linux-gnu"; \
+    elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then MULTIARCH="aarch64-linux-gnu"; \
+    else MULTIARCH="x86_64-linux-gnu"; fi; \
+    OSSL_MODULES_DIR="/usr/lib/${MULTIARCH}/ossl-modules"; \
+    echo "Verifying wolfProvider in ${OSSL_MODULES_DIR}..."; \
+    ls -la "${OSSL_MODULES_DIR}"/; \
+    if [ -f "${OSSL_MODULES_DIR}/libwolfprov.so" ]; then \
+        echo "✓ wolfProvider module found and verified"; \
     else \
-        echo "ERROR: wolfProvider module not found in expected locations"; \
+        echo "ERROR: wolfProvider module not found at ${OSSL_MODULES_DIR}/libwolfprov.so"; \
         exit 1; \
-    fi
+    fi; \
+    \
+    # Copy wolfProvider to a consistent location for runtime stage (architecture-independent)
+    mkdir -p /tmp/wolfprov-export; \
+    cp -v "${OSSL_MODULES_DIR}"/libwolfprov.so* /tmp/wolfprov-export/; \
+    echo "✓ wolfProvider exported to /tmp/wolfprov-export for runtime stage"
 
 ################################################################################
 # Build Erlang/OTP with FIPS support
@@ -297,70 +274,70 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8
 
 # Installation paths
-ENV OPENSSL_PREFIX=/usr/local/openssl
+# Using Ubuntu system OpenSSL 3.0.2 instead of building from source
+ENV OPENSSL_PREFIX=/usr
 ENV WOLFSSL_PREFIX=/usr/local
 ENV ERLANG_PREFIX=/opt/bitnami/erlang
 ENV RABBITMQ_PREFIX=/opt/bitnami/rabbitmq
 
 ################################################################################
-# CRITICAL FIPS STEP 1: Install FIPS OpenSSL to System Locations FIRST
-# This must happen BEFORE any apt-get install commands to ensure all
-# packages link to FIPS-validated OpenSSL instead of Ubuntu's system OpenSSL
+# Install system OpenSSL and FIPS components
 ################################################################################
 
-# Copy FIPS components from builder (before installing ANY packages)
-COPY --from=builder /usr/local/openssl /usr/local/openssl
+# Install Ubuntu system OpenSSL 3.0.2 and copy FIPS components from builder
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends openssl libssl-dev; \
+    rm -rf /var/lib/apt/lists/*; \
+    openssl version; \
+    echo "✓ Ubuntu system OpenSSL installed"
+
+# Copy FIPS components from builder
 COPY --from=builder /usr/local/lib/libwolfssl.so* /usr/local/lib/
 COPY --from=builder /usr/local/include/wolfssl /usr/local/include/wolfssl
-COPY --from=builder /usr/local/openssl/lib64/ossl-modules/libwolfprov.so* /tmp/wolfprov/
 
-# Install FIPS OpenSSL as system OpenSSL
+# Copy wolfProvider from builder to temporary location (architecture-independent path)
+COPY --from=builder /tmp/wolfprov-export/ /tmp/wolfprov/
+
+# Install wolfProvider to correct system OpenSSL modules directory
 RUN set -eux; \
-    echo "========================================"; \
-    echo "Installing FIPS OpenSSL as System OpenSSL"; \
-    echo "========================================"; \
+    ARCH=$(uname -m); \
+    if [ "$ARCH" = "x86_64" ]; then MULTIARCH="x86_64-linux-gnu"; \
+    elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then MULTIARCH="aarch64-linux-gnu"; \
+    else MULTIARCH="x86_64-linux-gnu"; fi; \
+    OSSL_MODULES_DIR="/usr/lib/${MULTIARCH}/ossl-modules"; \
+    echo "Setting up FIPS components for ${ARCH} architecture (modules: ${OSSL_MODULES_DIR})..."; \
     \
-    # Create necessary directories
-    mkdir -p /usr/lib/x86_64-linux-gnu; \
-    mkdir -p /usr/local/lib64/ossl-modules; \
-    \
-    # Install FIPS OpenSSL libraries to system locations
-    # This makes them the default OpenSSL that apt packages will link to
-    cp -av /usr/local/openssl/lib64/libssl.so* /usr/lib/x86_64-linux-gnu/; \
-    cp -av /usr/local/openssl/lib64/libcrypto.so* /usr/lib/x86_64-linux-gnu/; \
-    \
-    # Install wolfSSL to system locations
-    cp -av /usr/local/lib/libwolfssl.so* /usr/lib/x86_64-linux-gnu/; \
-    \
-    # Install wolfProvider module
-    cp -av /tmp/wolfprov/* /usr/local/lib64/ossl-modules/; \
+    # Create modules directory and copy wolfProvider
+    mkdir -p "${OSSL_MODULES_DIR}"; \
+    cp -av /tmp/wolfprov/* "${OSSL_MODULES_DIR}/"; \
     rm -rf /tmp/wolfprov; \
     \
-    # Install OpenSSL binary to system PATH
-    cp -av /usr/local/openssl/bin/openssl /usr/bin/openssl; \
+    # Verify wolfProvider was installed
+    if [ ! -f "${OSSL_MODULES_DIR}/libwolfprov.so" ]; then \
+        echo "ERROR: wolfProvider not found at ${OSSL_MODULES_DIR}"; \
+        ls -la "${OSSL_MODULES_DIR}" || true; \
+        exit 1; \
+    fi; \
+    echo "✓ wolfProvider installed at ${OSSL_MODULES_DIR}"; \
+    ls -la "${OSSL_MODULES_DIR}"; \
     \
-    # Configure dynamic linker to find FIPS libraries
-    echo "/usr/lib/x86_64-linux-gnu" > /etc/ld.so.conf.d/fips-openssl.conf; \
-    echo "/usr/local/openssl/lib64" >> /etc/ld.so.conf.d/fips-openssl.conf; \
-    echo "/usr/local/lib" >> /etc/ld.so.conf.d/fips-openssl.conf; \
+    # Configure dynamic linker to find wolfSSL
+    echo "${WOLFSSL_PREFIX}/lib" > /etc/ld.so.conf.d/fips-wolfssl.conf; \
     ldconfig; \
     \
-    echo "✓ FIPS OpenSSL installed to system locations"; \
-    echo "✓ All future apt packages will use FIPS OpenSSL"
-
-# Set OpenSSL environment variables for wolfProvider
-ENV OPENSSL_CONF="/usr/local/openssl/ssl/openssl.cnf" \
-    OPENSSL_MODULES="/usr/local/lib64/ossl-modules" \
-    LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:/usr/local/openssl/lib64:/usr/local/lib" \
-    PATH="/usr/bin:/usr/local/openssl/bin:${PATH}"
+    echo "✓ wolfSSL and wolfProvider installed to system locations"
 
 # Copy OpenSSL configuration with wolfProvider
-COPY openssl-wolfprov.cnf /usr/local/openssl/ssl/openssl.cnf
+COPY openssl-wolfprov.cnf /etc/ssl/openssl.cnf
 
-# Verify FIPS OpenSSL works BEFORE installing any packages
+# Set OpenSSL environment variables for wolfProvider
+ENV OPENSSL_CONF="/etc/ssl/openssl.cnf"
+
+# Verify FIPS OpenSSL and wolfProvider
 RUN set -eux; \
     echo "========================================"; \
-    echo "Verifying FIPS OpenSSL Installation"; \
+    echo "Verifying FIPS OpenSSL + wolfProvider"; \
     echo "========================================"; \
     openssl version; \
     echo ""; \
@@ -371,12 +348,12 @@ RUN set -eux; \
         echo "ERROR: wolfProvider not loaded!"; \
         exit 1; \
     fi; \
-    echo "✓ FIPS OpenSSL operational"; \
+    echo "✓ System OpenSSL 3.0.2 operational"; \
     echo "✓ wolfProvider loaded"; \
     echo "========================================"
 
 ################################################################################
-# NOW install runtime dependencies - they will automatically use FIPS OpenSSL
+# Install runtime dependencies
 ################################################################################
 RUN set -eux; \
     apt-get update; \
@@ -393,40 +370,6 @@ RUN set -eux; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/*; \
     echo "Runtime dependencies installed successfully (automatically using FIPS OpenSSL)"
-
-################################################################################
-# CRITICAL: Remove any system OpenSSL packages that were installed as dependencies
-################################################################################
-RUN set -eux; \
-    echo "========================================"; \
-    echo "Removing System OpenSSL Packages"; \
-    echo "========================================"; \
-    \
-    # Remove any OpenSSL packages that may have been installed as dependencies
-    apt-get remove -y libssl3 openssl libssl-dev 2>/dev/null || true; \
-    apt-get autoremove -y; \
-    apt-get clean; \
-    rm -rf /var/lib/apt/lists/*; \
-    \
-    # Remove any system OpenSSL libraries
-    find /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu -name 'libssl.so*' -o -name 'libcrypto.so*' | xargs rm -f 2>/dev/null || true; \
-    \
-    # Reinstall FIPS OpenSSL libraries to system locations
-    cp -av /usr/local/openssl/lib64/libssl.so* /usr/lib/x86_64-linux-gnu/; \
-    cp -av /usr/local/openssl/lib64/libcrypto.so* /usr/lib/x86_64-linux-gnu/; \
-    \
-    # Reinstall wolfSSL to system locations
-    cp -av /usr/local/lib/libwolfssl.so* /usr/lib/x86_64-linux-gnu/; \
-    \
-    # Reinstall FIPS OpenSSL binary to system PATH (removed by apt-get remove)
-    cp -av /usr/local/openssl/bin/openssl /usr/bin/openssl; \
-    \
-    # Update dynamic linker cache
-    ldconfig; \
-    \
-    echo "✓ System OpenSSL packages removed"; \
-    echo "✓ FIPS OpenSSL libraries reinstalled to system locations"; \
-    echo "✓ FIPS OpenSSL binary reinstalled to /usr/bin/openssl"
 
 ################################################################################
 # CRITICAL: Remove ALL non-FIPS crypto libraries for 100% FIPS compliance
@@ -484,9 +427,6 @@ COPY --from=builder /opt/bitnami/rabbitmq /opt/bitnami/rabbitmq
 # Copy RabbitMQ Bitnami scripts and configuration
 COPY --from=builder /opt/bitnami/rabbitmq /opt/bitnami/rabbitmq
 
-# Copy OpenSSL configuration
-COPY openssl-wolfprov.cnf /usr/local/openssl/ssl/openssl.cnf
-
 # Copy Erlang FIPS configuration
 COPY sys.config /opt/bitnami/rabbitmq/etc/sys.config
 
@@ -498,11 +438,10 @@ RUN mv /opt/bitnami/rabbitmq/sbin/rabbitmq-env /opt/bitnami/rabbitmq/sbin/rabbit
 COPY rabbitmq-env-fips.sh /opt/bitnami/rabbitmq/sbin/rabbitmq-env
 RUN chmod +x /opt/bitnami/rabbitmq/sbin/rabbitmq-env
 
-# Set environment variables for runtime (system location first for FIPS priority)
-ENV PATH="/usr/bin:/usr/local/openssl/bin:/opt/bitnami/erlang/bin:/opt/bitnami/rabbitmq/sbin:${PATH}"
-ENV LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:/usr/local/openssl/lib64:/usr/local/lib"
-ENV OPENSSL_CONF=/usr/local/openssl/ssl/openssl.cnf
-ENV OPENSSL_MODULES=/usr/local/lib64/ossl-modules
+# Set environment variables for runtime
+ENV PATH="/usr/bin:/opt/bitnami/erlang/bin:/opt/bitnami/rabbitmq/sbin:${PATH}"
+ENV LD_LIBRARY_PATH="/usr/local/lib"
+ENV OPENSSL_CONF=/etc/ssl/openssl.cnf
 
 # RabbitMQ environment variables
 ENV HOME="/opt/bitnami/rabbitmq/.rabbitmq"
@@ -516,9 +455,8 @@ ENV RABBITMQ_ENABLED_PLUGINS_FILE=/opt/bitnami/rabbitmq/etc/rabbitmq/enabled_plu
 ENV ERL_INETRC=/opt/bitnami/rabbitmq/etc/erl_inetrc
 ENV RABBITMQ_SERVER_CODE_PATH=/opt/bitnami/rabbitmq/ebin
 
-# Configure dynamic linker to find OpenSSL and wolfSSL libraries
-RUN echo "/usr/local/openssl/lib64" > /etc/ld.so.conf.d/openssl-fips.conf && \
-    echo "/usr/local/lib" >> /etc/ld.so.conf.d/openssl-fips.conf && \
+# Configure dynamic linker to find wolfSSL libraries (system OpenSSL in standard paths)
+RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/wolfssl.conf && \
     ldconfig
 
 # Copy FIPS startup check utility from builder
@@ -536,10 +474,8 @@ COPY rootfs /
 RUN set -eux; \
     echo '' >> /opt/bitnami/scripts/rabbitmq-env.sh; \
     echo '# FIPS Environment Configuration' >> /opt/bitnami/scripts/rabbitmq-env.sh; \
-    echo 'export LD_LIBRARY_PATH="/usr/local/openssl/lib64:/usr/local/lib:${LD_LIBRARY_PATH:-}"' >> /opt/bitnami/scripts/rabbitmq-env.sh; \
-    echo 'export OPENSSL_CONF="/usr/local/openssl/ssl/openssl.cnf"' >> /opt/bitnami/scripts/rabbitmq-env.sh; \
-    echo 'export OPENSSL_MODULES="/usr/local/lib64/ossl-modules"' >> /opt/bitnami/scripts/rabbitmq-env.sh; \
-    echo 'export PATH="/usr/local/openssl/bin:${PATH}"' >> /opt/bitnami/scripts/rabbitmq-env.sh; \
+    echo 'export LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH:-}"' >> /opt/bitnami/scripts/rabbitmq-env.sh; \
+    echo 'export OPENSSL_CONF="/etc/ssl/openssl.cnf"' >> /opt/bitnami/scripts/rabbitmq-env.sh; \
     echo 'export RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS="-config /opt/bitnami/rabbitmq/etc/sys ${RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS:-}"' >> /opt/bitnami/scripts/rabbitmq-env.sh; \
     cat /opt/bitnami/scripts/rabbitmq-env.sh | tail -10
 
@@ -610,10 +546,8 @@ RUN set -eux; \
 
 # FIPS Environment Variables - Must be set as Docker ENV for proper inheritance
 # These ENVs ensure the Erlang VM can find FIPS libraries when started
-ENV LD_LIBRARY_PATH="/usr/local/openssl/lib64:/usr/local/lib" \
-    OPENSSL_CONF="/usr/local/openssl/ssl/openssl.cnf" \
-    OPENSSL_MODULES="/usr/local/lib64/ossl-modules" \
-    PATH="/usr/local/openssl/bin:${PATH}"
+ENV LD_LIBRARY_PATH="/usr/local/lib" \
+    OPENSSL_CONF="/etc/ssl/openssl.cnf"
 
 # Environment metadata
 ENV APP_VERSION="3.13.7" \
